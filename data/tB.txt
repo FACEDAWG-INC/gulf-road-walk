@@ -1,0 +1,16 @@
+[out:json][timeout:120][bbox:29.335,48.030,29.368,48.070];
+(
+  way["building"];
+  relation["building"];
+  way["building:part"];
+  way["highway"];
+  way["leisure"];
+  way["landuse"~"^(grass|recreation_ground|forest|meadow|cemetery)$"];
+  way["natural"~"^(beach|sand|water|wood|scrub)$"];
+  way["man_made"~"^(pier|breakwater|groyne|tower)$"];
+  node["man_made"="tower"];
+  node["natural"="tree"];
+  node["name"]["tourism"];
+  way["amenity"="parking"];
+);
+out geom;

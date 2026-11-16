@@ -1,0 +1,853 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gulf Road Walk — Kuwait Towers to Messilah</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #b9d3e6; font-family: "Segoe UI", system-ui, sans-serif; color: #fff; }
+  canvas#view { display: block; width: 100%; height: 100%; }
+  #hud { position: fixed; left: 16px; top: 14px; text-shadow: 0 1px 3px rgba(0,0,0,.7); pointer-events: none; }
+  #place { font-size: 20px; font-weight: 600; letter-spacing: .2px; }
+  #sub { font-size: 13px; opacity: .9; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  #map { position: fixed; right: 14px; top: 14px; border-radius: 10px; background: rgba(12,28,40,.72); box-shadow: 0 2px 12px rgba(0,0,0,.35); }
+  #keys { position: fixed; left: 16px; bottom: 14px; font-size: 12px; opacity: .85; text-shadow: 0 1px 3px rgba(0,0,0,.8); pointer-events: none; line-height: 1.6; }
+  #keys b { background: rgba(0,0,0,.45); border-radius: 4px; padding: 1px 6px; font-weight: 600; }
+  #credit { position: fixed; right: 10px; bottom: 6px; font-size: 10.5px; opacity: .75; text-shadow: 0 1px 2px rgba(0,0,0,.9); pointer-events: none; }
+  #cross { position: fixed; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px; border-radius: 50%; background: rgba(255,255,255,.75); pointer-events: none; }
+  #start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(10,30,45,.55); backdrop-filter: blur(3px); cursor: pointer; }
+  #card { max-width: 520px; padding: 28px 32px; border-radius: 14px; background: rgba(14,32,46,.9); box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+  #card h1 { margin: 0 0 4px; font-size: 26px; }
+  #card p { margin: 6px 0 14px; opacity: .85; font-size: 14px; line-height: 1.5; }
+  #card table { font-size: 13.5px; border-spacing: 0 5px; }
+  #card td:first-child { padding-right: 16px; white-space: nowrap; }
+  kbd { background: #24465c; border-radius: 4px; padding: 2px 7px; font: 600 12px "Segoe UI", sans-serif; }
+  #go { margin-top: 16px; font-size: 15px; font-weight: 600; color: #ffd98a; }
+  #note { margin-top: 12px; font-size: 11.5px; opacity: .6; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud"><div id="place">Loading map data…</div><div id="sub"></div></div>
+<canvas id="map" width="150" height="230"></canvas>
+<div id="cross"></div>
+<div id="credit"></div>
+<div id="keys"></div>
+<div id="start">
+  <div id="card">
+    <h1>Gulf Road, Kuwait</h1>
+    <p>Kuwait Towers → Salmiya → Jumeirah Messilah Beach. About 17 km of coast, built from OpenStreetMap.</p>
+    <table>
+      <tr><td><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></td><td>Walk</td></tr>
+      <tr><td>Mouse</td><td>Look around (arrow keys also turn)</td></tr>
+      <tr><td><kbd>Shift</kbd></td><td>Run</td></tr>
+      <tr><td><kbd>Space</kbd></td><td>Jump (rise, when flying)</td></tr>
+      <tr><td><kbd>F</kbd></td><td>Toggle fly mode — fast, passes through buildings; <kbd>C</kbd> descends</td></tr>
+      <tr><td><kbd>G</kbd></td><td>Switch the ground between satellite photo and plain map</td></tr>
+      <tr><td><kbd>H</kbd></td><td>Shadows on / off (turn off if it runs slowly)</td></tr>
+      <tr><td><kbd>1</kbd> – <kbd>7</kbd></td><td>Jump to a landmark</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Release the mouse</td></tr>
+    </table>
+    <div id="go">Loading…</div>
+    <div id="note">Satellite ground streams live from Esri and needs an internet connection. Most building heights are estimated.</div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from './three.module.min.js';
+
+const $ = id => document.getElementById(id);
+const canvas = $('view');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+const HAZE = new THREE.Color(0xc9dcea);
+scene.fog = new THREE.Fog(HAZE, 250, 5200);
+const camera = new THREE.PerspectiveCamera(70, 1, 0.3, 14000);
+camera.rotation.order = 'YXZ';
+
+scene.add(new THREE.HemisphereLight(0xeaf3ff, 0xb8a888, 1.25));
+const sun = new THREE.DirectionalLight(0xfff1d6, 2.1);
+const SUN_DIR = new THREE.Vector3(-0.55, 0.8, 0.45).normalize();
+sun.position.copy(SUN_DIR);
+scene.add(sun, sun.target);
+// shadows cover a square that follows the player
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -380, right: 380, top: 380, bottom: -380, near: 10, far: 2400 });
+sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.6;
+
+// ---- sky dome --------------------------------------------------------------
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(12000, 24, 12),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { top: { value: new THREE.Color(0x3f86c9) }, hor: { value: HAZE }, sd: { value: SUN_DIR } },
+    vertexShader: 'varying vec3 p; void main(){ p = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+    fragmentShader: 'uniform vec3 top; uniform vec3 hor; uniform vec3 sd; varying vec3 p; void main(){ vec3 d = normalize(p); float h = clamp(d.y, 0.0, 1.0); float s = max(dot(d, sd), 0.0); vec3 c = mix(hor, top, pow(h, 0.55)); c += vec3(1.0, 0.93, 0.78) * (pow(s, 900.0) * 3.0 + pow(s, 40.0) * 0.35 + pow(s, 6.0) * 0.12); gl_FragColor = vec4(c, 1.0); }'
+  }));
+sky.renderOrder = -10;
+scene.add(sky);
+
+// ---- helpers ---------------------------------------------------------------
+const col = new THREE.Color();
+function rnd(i) { let h = (i ^ 0x9e3779b9) >>> 0; h = Math.imul(h ^ (h >>> 16), 0x85ebca6b); h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; }
+function mesh(pos, opts, extra = {}) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  for (const k in extra) g.setAttribute(k, new THREE.Float32BufferAttribute(extra[k], k === 'uv' ? 2 : 3));
+  if (!extra.normal) g.computeVertexNormals();
+  return new THREE.Mesh(g, new THREE.MeshLambertMaterial(opts));
+}
+// flat ground layers are painted in order with no depth writes, so nothing z-fights
+function groundLayer(pos, color, order, y = 0) {
+  const m = mesh(pos, { color, depthWrite: false });
+  m.renderOrder = order; m.position.y = y; m.frustumCulled = false; m.receiveShadow = true;
+  scene.add(m); return m;
+}
+
+// ---- satellite ground: Esri World Imagery tiles streamed around the player ---
+const LAT0 = 29.33, LON0 = 48.05, KX = Math.cos(LAT0 * Math.PI / 180) * 111320, KZ = 110574;
+const RINGS = [{ z: 14, r: 3, order: 30 }, { z: 17, r: 4, order: 31 }, { z: 19, r: 4, order: 32 }];
+const tiles = new Map(), texLoader = new THREE.TextureLoader();
+texLoader.setCrossOrigin('anonymous');
+let satOn = true, satLoaded = 0, satFailed = 0, osmLayers = [], roadLayers = [], grain = null, tileTick = 0;
+const tileLon = (x, n) => x / n * 360 - 180;
+const tileLat = (y, n) => Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI;
+function makeTile(z, x, y, order) {
+  const n = 2 ** z;
+  const x0 = (tileLon(x, n) - LON0) * KX, x1 = (tileLon(x + 1, n) - LON0) * KX;
+  const z0 = -(tileLat(y, n) - LAT0) * KZ, z1 = -(tileLat(y + 1, n) - LAT0) * KZ; // z0 = north edge
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute([x0, 0, z0, x0, 0, z1, x1, 0, z1, x0, 0, z0, x1, 0, z1, x1, 0, z0], 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1], 2));
+  const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ depthWrite: false }));
+  m.renderOrder = order; m.frustumCulled = false; m.receiveShadow = true; m.visible = false;
+  const t = { mesh: m, tick: tileTick, ready: false };
+  texLoader.load(`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`, tex => {
+    if (!tiles.has(z + '/' + x + '/' + y)) { tex.dispose(); return; }
+    tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    m.material.map = tex; m.material.needsUpdate = true; t.ready = true; m.visible = satOn; satLoaded++;
+  }, undefined, () => { if (++satFailed > 6 && !satLoaded) setSat(false); });
+  scene.add(m);
+  return t;
+}
+function updateTiles(px, pz) {
+  if (!satOn) return;
+  tileTick++;
+  const lon = LON0 + px / KX, lat = (LAT0 - pz / KZ) * Math.PI / 180;
+  let budget = 14;
+  for (const R of RINGS) {
+    const n = 2 ** R.z, cx = Math.floor((lon + 180) / 360 * n), cy = Math.floor((1 - Math.asinh(Math.tan(lat)) / Math.PI) / 2 * n);
+    // nearest tiles first
+    for (let d = 0; d <= R.r; d++) for (let i = -d; i <= d; i++) for (let j = -d; j <= d; j++) {
+      if (Math.max(Math.abs(i), Math.abs(j)) !== d) continue;
+      const k = R.z + '/' + (cx + i) + '/' + (cy + j), t = tiles.get(k);
+      if (t) t.tick = tileTick;
+      else if (budget > 0) { budget--; tiles.set(k, makeTile(R.z, cx + i, cy + j, R.order)); }
+    }
+  }
+  for (const [k, t] of tiles) if (tileTick - t.tick > 40) {
+    scene.remove(t.mesh); t.mesh.geometry.dispose(); if (t.mesh.material.map) t.mesh.material.map.dispose(); t.mesh.material.dispose(); tiles.delete(k);
+  }
+}
+function setSat(on) {
+  satOn = on;
+  for (const t of tiles.values()) t.mesh.visible = on && t.ready;
+  for (const m of osmLayers) m.visible = !on;
+  if (grain) grain.visible = on;
+  $('credit').textContent = on ? 'Imagery © Esri, Maxar, Earthstar Geographics · Map data © OpenStreetMap contributors' : 'Map data © OpenStreetMap contributors';
+}
+function fillPolygon(flat, out, scale = 0.1) {
+  const pts = [];
+  for (let i = 0; i < flat.length; i += 2) pts.push(new THREE.Vector2(flat[i] * scale, flat[i + 1] * scale));
+  if (pts.length < 3) return;
+  for (const t of THREE.ShapeUtils.triangulateShape(pts, [])) {
+    // wind so the face points up (+y)
+    const a = pts[t[0]], b = pts[t[1]], c = pts[t[2]];
+    const up = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) < 0;
+    const o = up ? [a, b, c] : [a, c, b];
+    for (const p of o) out.push(p.x, 0, p.y);
+  }
+}
+function ribbon(flat, w, out) {
+  const n = flat.length / 2, h = w / 2;
+  let plx, plz, prx, prz;
+  for (let i = 0; i < n; i++) {
+    const x = flat[i * 2] * 0.1, z = flat[i * 2 + 1] * 0.1;
+    const ax = i > 0 ? x - flat[i * 2 - 2] * 0.1 : 0, az = i > 0 ? z - flat[i * 2 - 1] * 0.1 : 0;
+    const bx = i < n - 1 ? flat[i * 2 + 2] * 0.1 - x : 0, bz = i < n - 1 ? flat[i * 2 + 3] * 0.1 - z : 0;
+    const al = Math.hypot(ax, az) || 1, bl = Math.hypot(bx, bz) || 1;
+    let dx = ax / al + bx / bl, dz = az / al + bz / bl;
+    const dl = Math.hypot(dx, dz);
+    if (dl < 1e-6) { dx = bx / bl || ax / al; dz = bz / bl || az / al; } else { dx /= dl; dz /= dl; }
+    const cosHalf = i > 0 && i < n - 1 ? Math.max(0.5, (ax / al) * dx + (az / al) * dz) : 1;
+    const s = h / cosHalf, nx = -dz * s, nz = dx * s;
+    const lx = x + nx, lz = z + nz, rx = x - nx, rz = z - nz;
+    if (i > 0) out.push(plx, 0, plz, lx, 0, lz, prx, 0, prz, prx, 0, prz, lx, 0, lz, rx, 0, rz);
+    plx = lx; plz = lz; prx = rx; prz = rz;
+  }
+}
+
+// ---- world -----------------------------------------------------------------
+let blockers = [], grid = new Map(), routePts = [], pois = [], landmarks = [];
+const GC = 60;
+function inPoly(p, x, z) {
+  let c = false;
+  for (let i = 0, j = p.length - 2; i < p.length; j = i, i += 2) {
+    const xi = p[i], zi = p[i + 1], xj = p[j], zj = p[j + 1];
+    if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) c = !c;
+  }
+  return c;
+}
+function blocked(x, z) {
+  const a = grid.get(Math.floor(x / GC) + ',' + Math.floor(z / GC));
+  if (!a) return false;
+  for (const b of a) if (x > b.x0 && x < b.x1 && z > b.z0 && z < b.z1 && inPoly(b.p, x, z)) return true;
+  return false;
+}
+function nearestRoute(x, z) {
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < routePts.length; i += 2) { const d = (routePts[i] - x) ** 2 + (routePts[i + 1] - z) ** 2; if (d < bd) { bd = d; best = i; } }
+  return [routePts[best], routePts[best + 1]];
+}
+
+// facade styles: 0 punched windows, 1 balconies, 2 glass curtain wall, 3 blank retail cladding
+function windowTexture(style = 0) {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, 128, 128);
+  if (style === 0) {
+    g.fillStyle = '#e6e6e6'; g.fillRect(0, 116, 128, 12);
+    g.fillStyle = '#cfcfcf'; g.fillRect(24, 88, 80, 5);
+    g.fillStyle = '#4d6478'; g.fillRect(28, 28, 72, 60);
+    g.fillStyle = '#7f9bb0'; g.fillRect(28, 28, 72, 16);
+    g.fillStyle = '#e8e8e8'; g.fillRect(62, 28, 4, 60);
+  } else if (style === 1) {
+    g.fillStyle = '#3f5568'; g.fillRect(10, 18, 108, 66);           // recessed glazing
+    g.fillStyle = '#6f8ba0'; g.fillRect(10, 18, 108, 14);
+    g.fillStyle = '#2c3b48'; g.fillRect(10, 18, 108, 5);            // shadow under the slab above
+    g.fillStyle = '#dedede'; g.fillRect(46, 18, 3, 66); g.fillRect(82, 18, 3, 66);
+    g.fillStyle = '#f4f4f4'; g.fillRect(0, 84, 128, 30);            // balcony front
+    g.fillStyle = '#bdbdbd'; g.fillRect(0, 84, 128, 3); g.fillRect(0, 111, 128, 3);
+    g.fillStyle = '#d8d8d8'; g.fillRect(0, 114, 128, 14);
+    g.fillStyle = '#e9e9e9'; g.fillRect(0, 0, 6, 128);
+  } else if (style === 2) {
+    const gr = g.createLinearGradient(0, 0, 0, 128); gr.addColorStop(0, '#8fb2c8'); gr.addColorStop(1, '#55748c');
+    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+    g.fillStyle = '#3f5a70'; g.fillRect(0, 98, 128, 30);            // spandrel
+    g.fillStyle = '#dfe6ea'; g.fillRect(0, 0, 3, 128); g.fillRect(64, 0, 2, 128); g.fillRect(0, 0, 128, 3); g.fillRect(0, 97, 128, 2);
+  } else if (style === 3) {
+    g.fillStyle = '#e4e4e4'; g.fillRect(0, 0, 128, 3); g.fillRect(0, 0, 2, 128);
+    g.fillStyle = '#f1f1f1'; g.fillRect(0, 60, 128, 8);
+  } else {
+    // precast panels: alternating colour bands with diagonal ribs
+    g.fillStyle = '#d2d2d2'; g.fillRect(0, 0, 128, 64);
+    g.strokeStyle = '#bdbdbd'; g.lineWidth = 3;
+    for (let x = -128; x < 256; x += 16) { g.beginPath(); g.moveTo(x, 64); g.lineTo(x + 64, 0); g.stroke(); }
+    g.strokeStyle = '#e6e6e6';
+    for (let x = -128; x < 256; x += 16) { g.beginPath(); g.moveTo(x, 64); g.lineTo(x + 64, 128); g.stroke(); }
+    g.fillStyle = '#a8a8a8'; g.fillRect(0, 62, 128, 3); g.fillRect(0, 0, 128, 2); g.fillRect(0, 0, 2, 128);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return t;
+}
+function mosaicTexture() {
+  // enamelled steel discs in blues, greens and greys, laid in diagonal spiral bands
+  const c = document.createElement('canvas'); c.width = 512; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#1c5873'; g.fillRect(0, 0, 512, 256);
+  const pal = ['#1f5f86', '#2a6fa8', '#3fa3b5', '#5cc0b0', '#8fd0c8', '#3d8d74', '#b9c7cc', '#2f86a0'];
+  for (let y = 0; y < 32; y++) for (let x = 0; x < 64; x++) {
+    const spiral = Math.floor((x + y * 0.75) / 4) + (rnd(x * 97 + y * 13) < 0.3 ? 1 : 0);
+    g.fillStyle = pal[((spiral % pal.length) + pal.length) % pal.length];
+    g.beginPath(); g.arc(x * 8 + 4 + (y % 2) * 4, y * 8 + 4, 3.3, 0, 7); g.fill();
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.wrapS = THREE.RepeatWrapping; t.repeat.set(2, 1);
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return t;
+}
+
+function buildTowers(T) {
+  const concrete = new THREE.MeshLambertMaterial({ color: 0xe8e4da });
+  const mosaic = new THREE.MeshLambertMaterial({ map: mosaicTexture() });
+  const glass = new THREE.MeshPhongMaterial({ color: 0x1d3a4a, shininess: 90, specular: 0x9fc4d8 });
+  const steel = new THREE.MeshLambertMaterial({ color: 0xcfd3d6 });
+  const grp = new THREE.Group();
+  const add = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; grp.add(m); return m; };
+  // smooth tapering concrete shaft from a height/radius profile
+  const shaft = (x, z, prof) => add(new THREE.LatheGeometry(prof.map(([y, r]) => new THREE.Vector2(r, y)), 36), concrete, x, 0, z);
+  const ball = (x, z, y, r, sy) => { const m = add(new THREE.SphereGeometry(r, 48, 28), mosaic, x, y, z); m.scale.y = sy; return m; };
+  // dark glazed band wrapped round a sphere between two heights (relative to its centre)
+  const band = (x, z, y, r, sy, a, b) => {
+    const pts = [];
+    for (let i = 0; i <= 8; i++) { const h = a + (b - a) * i / 8; pts.push(new THREE.Vector2(Math.sqrt(Math.max(0, 1 - (h / (r * sy)) ** 2)) * r + 0.12, h)); }
+    add(new THREE.LatheGeometry(pts, 48), glass, x, y, z);
+  };
+  const collar = (x, z, y, r) => add(new THREE.CylinderGeometry(r, r * 0.8, 1.6, 32), steel, x, y, z);
+  const fins = (x, z, r, h) => { for (let i = 0; i < 8; i++) { const a = i / 8 * 6.283; const m = add(new THREE.BoxGeometry(0.5, h, 3.2), concrete, x + Math.cos(a) * r, h / 2, z + Math.sin(a) * r); m.rotation.y = -a + Math.PI / 2; } };
+
+  // main tower, 187 m: big sphere (water tank below, restaurant above) + viewing sphere
+  let [x, z] = T.main;
+  shaft(x, z, [[0, 10.5], [6, 9.2], [30, 7.4], [62, 5.9], [95, 4.8], [123, 3.7], [140, 2.6], [150, 1.3], [165, 0.6], [187, 0.12]]);
+  fins(x, z, 10.2, 7);
+  ball(x, z, 80, 16.5, 0.86); band(x, z, 80, 16.5, 0.86, 1.5, 6.5); collar(x, z, 66.4, 8.2);
+  ball(x, z, 121, 9.8, 0.9); band(x, z, 121, 9.8, 0.9, -2.2, 4.4); collar(x, z, 112.8, 5.2);
+  // water tower, 147 m: single tank sphere
+  [x, z] = T.water;
+  shaft(x, z, [[0, 9], [6, 7.8], [30, 6.2], [56, 5], [84, 3.9], [104, 2.6], [116, 1.2], [130, 0.5], [147, 0.12]]);
+  fins(x, z, 8.7, 6);
+  ball(x, z, 72, 16, 0.86); collar(x, z, 58.8, 7.6);
+  // lighting needle, 113 m
+  [x, z] = T.light;
+  shaft(x, z, [[0, 4.2], [5, 3.4], [40, 2.4], [80, 1.3], [100, 0.6], [113, 0.1]]);
+  for (const y of [22, 34, 46]) add(new THREE.TorusGeometry(3.2 - y * 0.012, 0.28, 8, 24), steel, x, y, z).rotation.x = Math.PI / 2;
+  scene.add(grp);
+  for (const k of ['main', 'water', 'light']) {
+    const r = k === 'light' ? 3.5 : 8.5, p = [];
+    for (let i = 0; i < 12; i++) p.push(T[k][0] + Math.cos(i / 12 * 6.283) * r, T[k][1] + Math.sin(i / 12 * 6.283) * r);
+    blockers.push({ p });
+  }
+}
+
+// Marina Mall roofscape and the vaulted footbridge to Marina Crescent, placed by eye from the satellite photo
+function buildMarina() {
+  const white = new THREE.MeshLambertMaterial({ color: 0xf1f0ea }), glass = new THREE.MeshPhongMaterial({ color: 0x9fc3d6, shininess: 80, specular: 0xffffff });
+  const terra = new THREE.MeshLambertMaterial({ color: 0xd49a80 });
+  const add = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = true; scene.add(m); return m; };
+  // half-buried cylinder = barrel vault; (x0,z0)->(x1,z1) is its ridge line
+  const barrel = (x0, z0, x1, z1, r, y, mat) => {
+    const m = add(new THREE.CylinderGeometry(r, r, Math.hypot(x1 - x0, z1 - z0), 20, 1, false), mat, (x0 + x1) / 2, y, (z0 + z1) / 2);
+    m.rotation.z = Math.PI / 2; m.rotation.y = -Math.atan2(z1 - z0, x1 - x0); m.rotation.order = 'YXZ';
+  };
+  // footbridge over the Gulf Road: a glazed tube with structural ribs (per reference photo)
+  const tube = new THREE.MeshPhongMaterial({ color: 0xa9d0c6, shininess: 90, specular: 0xffffff }), rib = new THREE.MeshLambertMaterial({ color: 0x4d6258 });
+  barrel(1512, -1160, 1497, -1262, 5.4, 11.2, tube);
+  for (let i = 0; i <= 8; i++) {
+    const t = i / 8, m = add(new THREE.TorusGeometry(5.7, 0.35, 8, 28), rib, 1512 + (1497 - 1512) * t, 11.2, -1160 + (-1262 + 1160) * t);
+    m.rotation.y = -Math.atan2(-1262 + 1160, 1497 - 1512) + Math.PI / 2;
+  }
+  // the mall's glass geodesic dome
+  const dome = new THREE.IcosahedronGeometry(15, 2);
+  add(dome, new THREE.MeshPhongMaterial({ color: 0xa8cfe0, shininess: 100, specular: 0xffffff, flatShading: true }), 1526, 12.5, -1031);
+  const frame = new THREE.LineSegments(new THREE.WireframeGeometry(dome), new THREE.LineBasicMaterial({ color: 0xf4f4f0 }));
+  frame.position.set(1526, 12.5, -1031); scene.add(frame);
+  for (const [x, z] of [[1497, -1138], [1534, -1145], [1497, -1078], [1532, -1088]]) barrel(x, z - 12, x, z + 12, 5, 12.4, glass);
+  for (const [x, z] of [[1489, -1104], [1536, -1114]]) add(new THREE.ConeGeometry(6, 5, 4), glass, x, 14.8, z).rotation.y = Math.PI / 4;
+  add(new THREE.SphereGeometry(7, 24, 12, 0, 6.283, 0, Math.PI / 2), terra, 1555, 12.3, -1176);
+}
+
+// The Scientific Center: sail structures, the solar roof of the oval hall, the Fateh Al-Khair dhow
+// and the car-park shade canopies. All placed by eye from the satellite photo.
+function buildScience() {
+  const white = new THREE.MeshLambertMaterial({ color: 0xf6f4ee, side: THREE.DoubleSide });
+  const add = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; scene.add(m); return m; };
+  // a sail: mast with a bellied triangular sheet, like a dhow's lateen
+  const sail = (x, z, H, rot) => {
+    const w = H * 0.42, d = H * 0.12, v = [];
+    const A = [0, H, 0], B = [-w, 1, 0], C = [w * 0.75, 1, 0], Mid = [0, H * 0.33, d];
+    for (const t of [[A, B, Mid], [A, Mid, C], [B, C, Mid]]) for (const p of t) v.push(...p);
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3)); g.computeVertexNormals();
+    add(g, white, x, 0, z).rotation.y = rot;
+    add(new THREE.CylinderGeometry(0.25, 0.4, H + 2, 8), white, x, (H + 2) / 2, z);
+  };
+  // row of slender sail blades leaning over the arcade roof (per reference photo), mast raked ~40 degrees
+  const blade = (x, z, L, rot) => {
+    const g = new THREE.Group(), lean = 0.7, tx = Math.sin(lean) * L, ty = Math.cos(lean) * L;
+    const v = [tx, ty, 0, 0, 0, 0, tx * 0.55, 0, 2.2, tx, ty, 0, tx * 0.55, 0, -2.2, 0, 0, 0, tx, ty, 0, tx * 0.55, 0, 2.2, tx * 0.55, 0, -2.2];
+    const bg = new THREE.BufferGeometry(); bg.setAttribute('position', new THREE.Float32BufferAttribute(v, 3)); bg.computeVertexNormals();
+    const s = new THREE.Mesh(bg, white); s.castShadow = true; g.add(s);
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.28, L + 1.5, 8), white); mast.position.set(tx / 2, ty / 2, 0); mast.rotation.z = -lean; mast.castShadow = true; g.add(mast);
+    g.position.set(x, 17, z); g.rotation.y = rot; scene.add(g);
+  };
+  for (let i = 0; i < 7; i++) blade(3846 + i * 5.4, -2234 + i * 11.5, 20 - i * 0.8, 0.45);
+  // the two big tensile canopies over the entrances
+  for (const [x, z, r, h] of [[3935, -2232, 17, 15], [3884, -2178, 11, 10]]) add(new THREE.ConeGeometry(r, h, 4, 1, true), white, x, h / 2 + 2.5, z).rotation.y = 0.5;
+
+  // oval hall: dark solar field with a glass lantern in the middle
+  const solar = add(new THREE.CylinderGeometry(1, 1, 0.5, 48), new THREE.MeshPhongMaterial({ color: 0x1f2c3a, shininess: 60, specular: 0x6688aa }), 3703, 17.5, -2141);
+  solar.scale.set(72, 1, 40); solar.castShadow = false;
+  add(new THREE.ConeGeometry(13, 4, 4), new THREE.MeshPhongMaterial({ color: 0xa9cfdc, shininess: 90, specular: 0xffffff }), 3706, 19.7, -2141).rotation.y = Math.PI / 4;
+
+  // Fateh Al-Khair, the dhow on display by the water
+  const wood = new THREE.MeshLambertMaterial({ color: 0x7a4b2a }), deck = new THREE.MeshLambertMaterial({ color: 0xb48d5c });
+  const dx = 3810, dz = -2232, g = new THREE.Group();
+  const part = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = true; g.add(m); return m; };
+  part(new THREE.SphereGeometry(1, 24, 12, 0, 6.283, Math.PI / 2, Math.PI / 2), wood, 0, 4.4, 0).scale.set(12, 3.4, 3.2);
+  const dk = part(new THREE.CircleGeometry(1, 28), deck, 0, 4.42, 0); dk.rotation.x = -Math.PI / 2; dk.scale.set(12, 3.2, 1);
+  part(new THREE.BoxGeometry(0.45, 6, 0.5), wood, 11.6, 6, 0).rotation.z = -0.65;        // raked stem
+  part(new THREE.BoxGeometry(5.5, 1.5, 4.4), wood, -8.2, 5.1, 0);                         // poop deck
+  part(new THREE.CylinderGeometry(0.2, 0.3, 17, 8), wood, 2, 12.8, 0).rotation.z = -0.1;  // mast
+  part(new THREE.CylinderGeometry(0.12, 0.18, 24, 6), wood, 3, 17, 0).rotation.z = -1.0;  // lateen yard
+  for (const x of [-6, 0, 6]) part(new THREE.BoxGeometry(0.7, 1.4, 4.2), deck, x, 0.7, 0);
+  g.position.set(dx, 0, dz); g.rotation.y = 0.15; scene.add(g);
+  blockers.push({ p: [dx - 12, dz - 3.5, dx + 12, dz - 3.5, dx + 12, dz + 3.5, dx - 12, dz + 3.5] });
+
+  // car-park shade canopies east of the centre
+  const canopy = new THREE.MeshLambertMaterial({ color: 0xe6dcc6 }), post = new THREE.MeshLambertMaterial({ color: 0x9a9a96 });
+  for (const [x0, z0, x1, z1] of [[3977, -2260, 4091, -2288], [3962, -2229, 4097, -2265], [3965, -2209, 4107, -2245]]) {
+    const L = Math.hypot(x1 - x0, z1 - z0), a = -Math.atan2(z1 - z0, x1 - x0);
+    add(new THREE.BoxGeometry(L, 0.25, 12), canopy, (x0 + x1) / 2, 3.2, (z0 + z1) / 2).rotation.y = a;
+    for (let d = 4; d < L; d += 12) add(new THREE.CylinderGeometry(0.12, 0.12, 3.2, 6), post, x0 + (x1 - x0) * d / L, 1.6, z0 + (z1 - z0) * d / L);
+  }
+}
+
+function build(S) {
+  // route points (metres) for spawning, teleports, palms and the minimap
+  for (const r of S.route) for (let i = 0; i < r.length; i++) routePts.push(r[i] * 0.1);
+
+  // sea + land
+  const sea = new THREE.Mesh(new THREE.PlaneGeometry(60000, 60000), new THREE.MeshLambertMaterial({ color: 0x2f86a6, depthWrite: false }));
+  sea.rotation.x = -Math.PI / 2; sea.position.y = -0.8; sea.renderOrder = -5; scene.add(sea);
+  const land = [];
+  for (const c of S.coast) {
+    const p = c.p.slice();
+    if (!c.c) { // open mainland chain runs south -> north-west; close it far inland
+      p.push(-140000, 50000, -140000, 250000, p[0] - 30000, 250000);
+    }
+    fillPolygon(p, land);
+  }
+  groundLayer(land, 0xd8ccb2, 0);
+
+  const AREAS = { beach: 0xecdcae, scrub: 0xb5b27c, park: 0x7fa55c, pitch: 0x5c9a52, parking: 0x8b8d8f, plaza: 0xcfc4ae, pier: 0xb3a892, water: 0x4aa3c4 };
+  let order = 1;
+  for (const k in AREAS) {
+    const pos = [];
+    for (const a of S.areas) if (a.k === k) fillPolygon(a.p, pos);
+    if (pos.length) osmLayers.push(groundLayer(pos, AREAS[k], order));
+    order++;
+  }
+  const ROADS = [[4, 0xb3a892], [3, 0xc4b79c], [2, 0x5b5e63], [1, 0x4b4e53], [0, 0x3b3e43]];
+  for (const [k, c] of ROADS) {
+    const pos = [];
+    for (const r of S.roads) if (r.k === k) ribbon(r.p, r.w, pos);
+    if (pos.length) {
+      const m = groundLayer(pos, c, order + 40);
+      if (k <= 2) { m.material.transparent = true; roadLayers.push(m); } else osmLayers.push(m);
+    }
+    order++;
+  }
+  // lane dashes on the Gulf Road
+  const dash = [];
+  for (const r of S.roads) {
+    if (!r.g) continue;
+    let carry = 0;
+    for (let i = 0; i < r.p.length - 2; i += 2) {
+      const ax = r.p[i] * 0.1, az = r.p[i + 1] * 0.1, bx = r.p[i + 2] * 0.1, bz = r.p[i + 3] * 0.1;
+      const L = Math.hypot(bx - ax, bz - az); if (L < 0.01) continue;
+      const dx = (bx - ax) / L, dz = (bz - az) / L, nx = -dz, nz = dx;
+      for (let d = carry; d < L - 3; d += 12) {
+        for (const off of [-r.w / 6, r.w / 6]) {
+          const x = ax + dx * d + nx * off, z = az + dz * d + nz * off, e = 0.08;
+          const x2 = x + dx * 3, z2 = z + dz * 3;
+          dash.push(x + nx * e, 0, z + nz * e, x2 + nx * e, 0, z2 + nz * e, x - nx * e, 0, z - nz * e,
+                    x - nx * e, 0, z - nz * e, x2 + nx * e, 0, z2 + nz * e, x2 - nx * e, 0, z2 - nz * e);
+        }
+      }
+      carry = (12 - ((L - carry) % 12)) % 12;
+    }
+  }
+  const dm = groundLayer(dash, 0xe8e8e0, 40 + order++);
+  dm.material.side = THREE.DoubleSide; dm.material.transparent = true; roadLayers.push(dm);
+
+  // fine grain multiplied over the ground near the player, so the satellite
+  // photo doesn't read as a smear at walking height
+  const gc = document.createElement('canvas'); gc.width = gc.height = 256;
+  const gx = gc.getContext('2d'), gi = gx.createImageData(256, 256);
+  for (let i = 0; i < 65536; i++) { const v = 96 + rnd(i * 31 + 7) * 64 + rnd((i >> 2) * 13) * 32; gi.data[i * 4] = gi.data[i * 4 + 1] = gi.data[i * 4 + 2] = v; gi.data[i * 4 + 3] = 255; }
+  gx.putImageData(gi, 0, 0);
+  const gt = new THREE.CanvasTexture(gc); gt.wrapS = gt.wrapT = THREE.RepeatWrapping; gt.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  grain = new THREE.Mesh(new THREE.PlaneGeometry(260, 260).rotateX(-Math.PI / 2), new THREE.ShaderMaterial({
+    uniforms: { map: { value: gt }, eye: { value: new THREE.Vector3() } },
+    vertexShader: 'varying vec3 w; void main(){ vec4 p = modelMatrix * vec4(position,1.0); w = p.xyz; gl_Position = projectionMatrix * viewMatrix * p; }',
+    fragmentShader: 'uniform sampler2D map; uniform vec3 eye; varying vec3 w; void main(){ float n = texture2D(map, w.xz * 0.33).r * 0.6 + texture2D(map, w.xz * 0.045).r * 0.4; float f = smoothstep(120.0, 8.0, distance(w.xz, eye.xz)) * smoothstep(70.0, 6.0, eye.y); gl_FragColor = vec4(vec3(mix(0.5, n, f * 0.9)), 1.0); }',
+    transparent: true, depthWrite: false, blending: THREE.CustomBlending, blendSrc: THREE.DstColorFactor, blendDst: THREE.SrcColorFactor
+  }));
+  grain.renderOrder = 39; grain.frustumCulled = false; scene.add(grain);
+
+  // buildings: one merged wall mesh (window texture) + one merged roof mesh
+  const WALLS = [0xe9dcc3, 0xf1ebdf, 0xd9c9a8, 0xe3d6c4, 0xcfc6b8, 0xf4efe6, 0xd6b99a, 0xc9c4bb];
+  const GLASS = [0x9fc0d4, 0xb9cdd8, 0x8fb0c4, 0xd6dde0, 0xa9c4b8];
+  const W = [0, 1, 2, 3, 4].map(() => ({ p: [], n: [], c: [], u: [] })), rp = [], rc = [];
+  // Per-building overrides for the landmark areas: [centre x, centre z, {h height, st facade style, c wall colour, rc roof colour}].
+  // Colours/materials come from reference photos and published descriptions where noted; "typ." = typical look, not verified.
+  const OV = [
+    // --- Marina ---
+    [1529, -1006, { h: 14, st: 3, c: 0xe9d8b4, rc: 0xb4573d }],   // Marina Mall: beige render, red tile roofs (worldarchitecture.org)
+    [1487, -1351, { h: 9, st: 3, c: 0xe9d8b4, rc: 0xb4573d }],    // Marina Crescent: same design as the mall
+    [1505, -1231, { st: 2, c: 0x9fc9bf, rc: 0xdfe5e2 }],          // glazed footbridge (Commons photo)
+    [1648, -928, { h: 12, st: 3, c: 0xe4d6b8 }],                  // Marks & Spencer
+    [1261, -641, { h: 16, st: 3, c: 0xe6dccb }],                  // Al-Salaam Mall
+    [1324, -1014, { st: 1, c: 0xefe6d2 }],                        // Marina Residence, 70 m / 15 floors (OSM)
+    [1305, -1070, { st: 2, c: 0x9db9cc }],                        // Levels Tower (typ. glass)
+    [1121, -746, { st: 1, c: 0xe8dcc6 }],                         // Best Western Plus Salmiya (typ.)
+    // --- Scientific Center ---
+    [3783, -2170, { h: 18, st: 4, c: 0xb58c62, rc: 0x8f7a63 }],   // mud-coloured banded precast (PCI Journal, GC Kuwait)
+    [3773, -2006, { h: 25, st: 3, c: 0xddd6c6 }],                 // Olympia Mall podium
+    [3808, -2012, { h: 90, st: 2, c: 0x8fb4cf }],                 // Olympia Towers: 18 floors, ~90 m unconfirmed (skyscraperpage); OSM says 125
+    [3836, -2036, { h: 90, st: 2, c: 0x8fb4cf }],
+    [3731, -1990, { st: 2, c: 0xa9c2d2 }],
+    [3367, -1791, { st: 2, c: 0x9aaebd }],                        // Symphony Style Hotel tower (typ. glass)
+    [3364, -1784, { st: 3, c: 0xd9d2c4 }],
+    [3458, -1847, { st: 2, c: 0xa7c4d6 }],                        // The View tower (typ. glass)
+    [3458, -1843, { st: 3, c: 0xdcd5c8 }],
+    [3512, -1859, { st: 3, c: 0xe2dacb }],                        // Terrace Mall
+    [4278, -1803, { h: 42, st: 0, c: 0xd9c6a0 }],                 // Holiday Inn: 10 floors (OSM) can't be the 60 m it's tagged
+    [4327, -2109, { st: 1, c: 0xefe7d6 }], [4371, -2123, { st: 1, c: 0xe9dcc4 }], [4398, -2132, { st: 1, c: 0xe9dcc4 }],
+    [3630, -1931, { st: 1, c: 0xece2cf }],
+    // --- Kuwait Towers area ---
+    [-5112, -6646, { h: 60, st: 1, c: 0xeee6d6 }],                // tagged "60 levels", which would be 205 m; treated as 60 m
+    [-5009, -6590, { st: 1, c: 0xf0e9da }], [-5087, -6605, { st: 1, c: 0xe8dcc8 }], [-5182, -6570, { st: 1, c: 0xefe8da }],
+    [-5013, -6629, { st: 2, c: 0x9fbccd }],
+    ...[[-5061, -6226], [-4883, -6192], [-4858, -6210], [-4872, -6284], [-4832, -6229], [-4851, -6255], [-4983, -6246], [-4961, -6260], [-4939, -6276]]
+      .map(([x, z]) => [x, z, { st: 1, c: 0xf1ede3 }])            // the six-storey slab blocks south of the Towers
+  ];
+  const col2 = new THREE.Color();
+  S.buildings.forEach((b, bi) => {
+    const p = b.p, n = p.length / 2, r = rnd(bi * 7919 + n), r2 = rnd(bi * 131 + 5);
+    let ax0 = Infinity, ax1 = -Infinity, az0 = Infinity, az1 = -Infinity;
+    for (let i = 0; i < p.length; i += 2) { if (p[i] < ax0) ax0 = p[i]; if (p[i] > ax1) ax1 = p[i]; if (p[i + 1] < az0) az0 = p[i + 1]; if (p[i + 1] > az1) az1 = p[i + 1]; }
+    const ocx = (ax0 + ax1) / 20, ocz = (az0 + az1) / 20;
+    const hit = OV.find(o => Math.abs(o[0] - ocx) < 4 && Math.abs(o[1] - ocz) < 4), ov = hit ? hit[2] : null;
+    // pick a facade style from what the building is and how tall it is
+    let st = 0;
+    if (b.k === 3 || b.m) st = 3;
+    else if (b.k === 5) st = r2 < 0.6 ? 2 : 1;
+    else if (b.h > 38) st = r2 < 0.45 ? 2 : 1;
+    else if (b.k === 2 || b.h > 15) st = r2 < 0.7 ? 1 : 0;
+    else if (b.h < 4.5) st = 3;
+    if (ov && ov.st !== undefined) st = ov.st;
+    const pal = st === 2 ? GLASS : WALLS;
+    col.setHex(ov && ov.c ? ov.c : b.k === 4 ? 0xf3ecd8 : pal[Math.floor(r * pal.length)]);
+    const sh = ov && ov.c ? 1 : 0.88 + rnd(bi) * 0.2, cr = col.r * sh, cg = col.g * sh, cb = col.b * sh;
+    let tr = cr * 0.8, tg = cg * 0.8, tb = cb * 0.8;
+    if (ov && ov.rc) { col2.setHex(ov.rc); tr = col2.r; tg = col2.g; tb = col2.b; }
+    const y0 = b.m || 0, y1 = (ov && ov.h) || b.h;
+    const { p: wp, n: wn, c: wc, u: wu } = W[st];
+    let u = 0, x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    const mp = new Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      const ax = p[i * 2] * 0.1, az = p[i * 2 + 1] * 0.1, j = (i + 1) % n, bx = p[j * 2] * 0.1, bz = p[j * 2 + 1] * 0.1;
+      mp[i * 2] = ax; mp[i * 2 + 1] = az;
+      if (ax < x0) x0 = ax; if (ax > x1) x1 = ax; if (az < z0) z0 = az; if (az > z1) z1 = az;
+      const L = Math.hypot(bx - ax, bz - az); if (L < 0.01) continue;
+      const nx = (bz - az) / L, nz = -(bx - ax) / L;
+      const bays = Math.max(1, Math.round(L / 4)), ua = u, ub = u + bays; u = ub;
+      const floors = Math.max(1, Math.round((y1 - y0) / 3.4));
+      wp.push(ax, y0, az, bx, y0, bz, bx, y1, bz, ax, y0, az, bx, y1, bz, ax, y1, az);
+      wu.push(ua, 0, ub, 0, ub, floors, ua, 0, ub, floors, ua, floors);
+      for (let v = 0; v < 6; v++) { wn.push(nx, 0, nz); wc.push(cr, cg, cb); }
+    }
+    // roof sits a little below the wall tops, which leaves a parapet all round
+    const top = [], ry = y1 - y0 > 5 ? y1 - 0.8 : y1;
+    fillPolygon(p, top);
+    for (let i = 0; i < top.length; i += 3) { rp.push(top[i], ry, top[i + 2]); rc.push(tr, tg, tb); }
+    if (y0) for (let i = top.length - 3; i >= 0; i -= 3) { rp.push(top[i], y0, top[i + 2]); rc.push(cr * 0.6, cg * 0.6, cb * 0.6); } // underside
+    // stair core / plant room on bigger flat roofs
+    const bx = (x0 + x1) / 2 + (r2 - 0.5) * (x1 - x0) * 0.3, bz = (z0 + z1) / 2 + (r - 0.5) * (z1 - z0) * 0.3;
+    if (!y0 && y1 > 9 && (x1 - x0) > 12 && (z1 - z0) > 12 && inPoly(mp, bx, bz) && inPoly(mp, bx + 3, bz + 3) && inPoly(mp, bx - 3, bz - 3)) {
+      const s = 2 + r * 1.6, hy = ry + 2.4 + r2 * 1.2, q = W[3], cs = [[-s, -s], [s, -s], [s, s], [-s, s]];
+      for (let i = 0; i < 4; i++) {
+        const [ax, az] = cs[i], [cx, cz] = cs[(i + 1) % 4];
+        q.p.push(bx + ax, ry, bz + az, bx + cx, ry, bz + cz, bx + cx, hy, bz + cz, bx + ax, ry, bz + az, bx + cx, hy, bz + cz, bx + ax, hy, bz + az);
+        q.u.push(0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1);
+        for (let v = 0; v < 6; v++) { q.n.push((cz - az) / (2 * s), 0, -(cx - ax) / (2 * s)); q.c.push(cr * 0.95, cg * 0.95, cb * 0.95); }
+      }
+      rp.push(bx - s, hy, bz - s, bx - s, hy, bz + s, bx + s, hy, bz + s, bx - s, hy, bz - s, bx + s, hy, bz + s, bx + s, hy, bz - s);
+      for (let v = 0; v < 6; v++) rc.push(cr * 0.85, cg * 0.85, cb * 0.85);
+    }
+    if (!y0) blockers.push({ p: mp, x0, x1, z0, z1 });
+  });
+  W.forEach((w, st) => {
+    if (!w.p.length) return;
+    const walls = mesh(w.p, { vertexColors: true, map: windowTexture(st), side: THREE.DoubleSide }, { normal: w.n, color: w.c, uv: w.u });
+    walls.frustumCulled = false; walls.castShadow = walls.receiveShadow = true; walls.material.shadowSide = THREE.DoubleSide; scene.add(walls);
+  });
+  const roofs = mesh(rp, { vertexColors: true }, { color: rc });
+  roofs.frustumCulled = false; roofs.receiveShadow = true; roofs.material.side = THREE.DoubleSide; scene.add(roofs);
+
+  buildTowers(S.towers);
+  buildMarina();
+  buildScience();
+
+  // collision grid
+  for (const b of blockers) {
+    if (b.x0 === undefined) { b.x0 = b.z0 = Infinity; b.x1 = b.z1 = -Infinity; for (let i = 0; i < b.p.length; i += 2) { b.x0 = Math.min(b.x0, b.p[i]); b.x1 = Math.max(b.x1, b.p[i]); b.z0 = Math.min(b.z0, b.p[i + 1]); b.z1 = Math.max(b.z1, b.p[i + 1]); } }
+    for (let i = Math.floor(b.x0 / GC); i <= Math.floor(b.x1 / GC); i++) for (let j = Math.floor(b.z0 / GC); j <= Math.floor(b.z1 / GC); j++) {
+      const k = i + ',' + j; if (!grid.has(k)) grid.set(k, []); grid.get(k).push(b);
+    }
+  }
+
+  // palms along both edges of the Gulf Road (decorative, not from the map data)
+  const spots = [], lamps = [];
+  for (const r of S.roads) {
+    if (!r.g) continue;
+    let carry = 10, count = 0;
+    for (let i = 0; i < r.p.length - 2; i += 2) {
+      const ax = r.p[i] * 0.1, az = r.p[i + 1] * 0.1, bx = r.p[i + 2] * 0.1, bz = r.p[i + 3] * 0.1;
+      const L = Math.hypot(bx - ax, bz - az); if (L < 0.01) continue;
+      const dx = (bx - ax) / L, dz = (bz - az) / L;
+      let d = carry;
+      for (; d < L; d += 19, count++) for (const s of [-1, 1]) {
+        const lamp = count % 4 === 2, off = r.w / 2 + (lamp ? 1.6 : 3.5);
+        if (count % 2 && !lamp) continue;
+        const x = ax + dx * d - dz * s * off, z = az + dz * d + dx * s * off;
+        if (blocked(x, z)) continue;
+        if (lamp) lamps.push(x, z, Math.atan2(dx * s, dz * s)); else spots.push(x, z);
+      }
+      carry = d - L;
+    }
+  }
+  const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), V = new THREE.Vector3(), Sc = new THREE.Vector3();
+
+  // street lights: pole + arm reaching over the carriageway
+  const lg = [], lampPart = (geo, x, y, z) => { const p = geo.translate(x, y, z).toNonIndexed().attributes.position.array; for (const v of p) lg.push(v); };
+  lampPart(new THREE.CylinderGeometry(0.09, 0.16, 10, 6), 0, 5, 0);
+  lampPart(new THREE.BoxGeometry(2.6, 0.12, 0.12), 1.3, 10, 0);
+  lampPart(new THREE.BoxGeometry(0.9, 0.16, 0.34), 2.5, 9.92, 0);
+  const lgeo = new THREE.BufferGeometry(); lgeo.setAttribute('position', new THREE.Float32BufferAttribute(lg, 3)); lgeo.computeVertexNormals();
+  const poles = new THREE.InstancedMesh(lgeo, new THREE.MeshLambertMaterial({ color: 0x8d9296 }), lamps.length / 3);
+  for (let i = 0; i < lamps.length / 3; i++) {
+    M.compose(V.set(lamps[i * 3], 0, lamps[i * 3 + 1]), Q.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, lamps[i * 3 + 2]), Sc.set(1, 1, 1)); poles.setMatrixAt(i, M);
+  }
+  poles.frustumCulled = false; poles.castShadow = true; scene.add(poles);
+
+  // boats moored along the mapped marina piers (the boats themselves are decorative)
+  const berths = [];
+  S.roads.forEach((r, ri) => {
+    if (r.k !== 4 || r.w !== 4) return;
+    let n = 0;
+    for (let i = 0; i < r.p.length - 2; i += 2) {
+      const ax = r.p[i] * 0.1, az = r.p[i + 1] * 0.1, bx = r.p[i + 2] * 0.1, bz = r.p[i + 3] * 0.1;
+      const L = Math.hypot(bx - ax, bz - az); if (L < 12) continue;
+      const dx = (bx - ax) / L, dz = (bz - az) / L;
+      for (let d = 5; d < L - 3; d += 5.2, n++) for (const s of [-1, 1]) {
+        const h = rnd(ri * 977 + n * 13 + s);
+        if (h < 0.3) continue;
+        const sc = 0.65 + h * 0.6, off = 2.4 + 4.6 * sc;
+        const x = ax + dx * d - dz * s * off, z = az + dz * d + dx * s * off;
+        if (!blocked(x, z)) berths.push(x, z, Math.atan2(dx * s, dz * s) + Math.PI, sc, h);
+      }
+    }
+  });
+  const bg = [], boatPart = geo => { const p = geo.toNonIndexed().attributes.position.array; for (const v of p) bg.push(v); };
+  const hull = new THREE.Shape(); hull.moveTo(-4.5, -1.35); hull.lineTo(1.6, -1.5); hull.lineTo(4.6, 0); hull.lineTo(1.6, 1.5); hull.lineTo(-4.5, 1.35); hull.closePath();
+  boatPart(new THREE.ExtrudeGeometry(hull, { depth: 1.25, bevelEnabled: false }).rotateX(-Math.PI / 2).translate(0, -0.15, 0));
+  boatPart(new THREE.BoxGeometry(3.4, 1.0, 2.1).translate(-0.9, 1.6, 0));
+  boatPart(new THREE.BoxGeometry(1.6, 0.7, 1.7).translate(-1.3, 2.45, 0));
+  const bgeo = new THREE.BufferGeometry(); bgeo.setAttribute('position', new THREE.Float32BufferAttribute(bg, 3)); bgeo.computeVertexNormals();
+  const boats = new THREE.InstancedMesh(bgeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), berths.length / 5);
+  const BOAT = [0xffffff, 0xf4f1e8, 0xffffff, 0xe9eef2, 0x2b4a6b, 0xffffff];
+  for (let i = 0; i < berths.length / 5; i++) {
+    const sc = berths[i * 5 + 3];
+    M.compose(V.set(berths[i * 5], 0, berths[i * 5 + 1]), Q.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, berths[i * 5 + 2]), Sc.set(sc, sc, sc)); boats.setMatrixAt(i, M);
+    boats.setColorAt(i, col.setHex(BOAT[Math.floor(berths[i * 5 + 4] * 97) % BOAT.length]));
+  }
+  boats.frustumCulled = false; boats.castShadow = boats.receiveShadow = true; scene.add(boats);
+
+  const nP = spots.length / 2;
+  const trunk =new THREE.InstancedMesh(new THREE.CylinderGeometry(0.2, 0.36, 1, 7).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: 0x7d654a }), nP);
+  // date-palm crown: arching, drooping fronds
+  const fp = [];
+  for (let f = 0; f < 13; f++) {
+    const a = f / 13 * 6.283 + (f % 2) * 0.2, ca = Math.cos(a), sa = Math.sin(a), droop = f % 2 ? 2.6 : 1.5, len = f % 2 ? 3.4 : 4;
+    let prev = null;
+    for (let i = 0; i <= 6; i++) {
+      const t = i / 6, r = len * t, y = 1.5 * Math.sin(t * 2.4) - droop * t * t, w = 0.62 * Math.sin(Math.PI * (0.12 + 0.88 * t)) + 0.03;
+      const cur = [ca * r - sa * w, y, sa * r + ca * w, ca * r + sa * w, y, sa * r - ca * w, ca * r, y + 0.22, sa * r];
+      if (prev) for (const [p, q] of [[0, 6], [6, 3]]) fp.push(prev[p], prev[p + 1], prev[p + 2], cur[p], cur[p + 1], cur[p + 2], prev[q], prev[q + 1], prev[q + 2], prev[q], prev[q + 1], prev[q + 2], cur[p], cur[p + 1], cur[p + 2], cur[q], cur[q + 1], cur[q + 2]);
+      prev = cur;
+    }
+  }
+  const fg = new THREE.BufferGeometry(); fg.setAttribute('position', new THREE.Float32BufferAttribute(fp, 3)); fg.computeVertexNormals();
+  const frond = new THREE.InstancedMesh(fg, new THREE.MeshLambertMaterial({ color: 0x4c7a34, side: THREE.DoubleSide }), nP);
+  trunk.castShadow = frond.castShadow = true;
+  for (let i = 0; i < nP; i++) {
+    const h = 6.5 + rnd(i) * 4;
+    M.compose(V.set(spots[i * 2], 0, spots[i * 2 + 1]), Q.identity(), Sc.set(1, h, 1)); trunk.setMatrixAt(i, M);
+    const s = 0.8 + rnd(i + 999) * 0.5;
+    M.compose(V.set(spots[i * 2], h, spots[i * 2 + 1]), Q.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, rnd(i * 3) * 6.28), Sc.set(s, s, s)); frond.setMatrixAt(i, M);
+  }
+  trunk.frustumCulled = frond.frustumCulled = false;
+  scene.add(trunk, frond);
+
+  pois = S.pois;
+  const find = (re, fb) => { const p = S.pois.find(p => re.test(p.n)); return p ? [p.x, p.z] : fb; };
+  landmarks = [
+    ['Kuwait Towers', S.towers.main],
+    ['Green Island', find(/^Green Island/i, [-2174, -3862])],
+    ['Al-Shaab Park', find(/Shaab Park/i, [-2042, -1918])],
+    ['Marina Mall', find(/^Marina Mall/i, [1539, -1001])],
+    ['The Scientific Center', find(/Scientific Cent/i, [3816, -2175])],
+    ['Palms Beach, Al Bidaa', find(/Palms Beach/i, [3537, 3075])],
+    ['Jumeirah Messilah Beach', find(/Jumeirah/i, [3756, 6751])]
+  ].map(([n, p]) => ({ n, x: p[0], z: p[1] }));
+  pois.push({ x: S.towers.main[0], z: S.towers.main[1], n: 'Kuwait Towers' });
+  drawMapBase(S);
+}
+
+// ---- minimap ---------------------------------------------------------------
+const mapC = $('map'), mctx = mapC.getContext('2d');
+let mapBase, mapT;
+function drawMapBase(S) {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (let i = 0; i < routePts.length; i += 2) { x0 = Math.min(x0, routePts[i]); x1 = Math.max(x1, routePts[i]); z0 = Math.min(z0, routePts[i + 1]); z1 = Math.max(z1, routePts[i + 1]); }
+  const pad = 14, s = Math.min((mapC.width - pad * 2) / (x1 - x0), (mapC.height - pad * 2) / (z1 - z0));
+  const ox = (mapC.width - (x1 - x0) * s) / 2 - x0 * s, oz = (mapC.height - (z1 - z0) * s) / 2 - z0 * s;
+  mapT = (x, z) => [x * s + ox, z * s + oz];
+  mapBase = document.createElement('canvas'); mapBase.width = mapC.width; mapBase.height = mapC.height;
+  const g = mapBase.getContext('2d');
+  g.fillStyle = '#1d5f7c'; g.fillRect(0, 0, mapBase.width, mapBase.height);
+  g.fillStyle = '#c9bfa6';
+  for (const c of S.coast) {
+    const p = c.p.slice(); if (!c.c) p.push(-140000, 50000, -140000, 250000, p[0] - 30000, 250000);
+    g.beginPath(); for (let i = 0; i < p.length; i += 2) { const [a, b] = mapT(p[i] * 0.1, p[i + 1] * 0.1); i ? g.lineTo(a, b) : g.moveTo(a, b); } g.closePath(); g.fill();
+  }
+  g.strokeStyle = '#33373c'; g.lineWidth = 1.6; g.lineJoin = 'round';
+  for (const r of S.route) { g.beginPath(); for (let i = 0; i < r.length; i += 2) { const [a, b] = mapT(r[i] * 0.1, r[i + 1] * 0.1); i ? g.lineTo(a, b) : g.moveTo(a, b); } g.stroke(); }
+  g.font = '600 9px Segoe UI, sans-serif'; g.textBaseline = 'middle';
+  landmarks.forEach((l, i) => {
+    const [a, b] = mapT(l.x, l.z);
+    g.fillStyle = '#fff'; g.beginPath(); g.arc(a, b, 5.5, 0, 7); g.fill();
+    g.fillStyle = '#123'; g.textAlign = 'center'; g.fillText(i + 1, a, b + 0.5);
+  });
+}
+function drawMap() {
+  if (!mapBase) return;
+  mctx.drawImage(mapBase, 0, 0);
+  const [a, b] = mapT(pos.x, pos.z);
+  mctx.save(); mctx.translate(a, b); mctx.rotate(-yaw);
+  mctx.fillStyle = '#ffcf4a'; mctx.strokeStyle = '#000'; mctx.lineWidth = 1;
+  mctx.beginPath(); mctx.moveTo(0, -8); mctx.lineTo(5, 6); mctx.lineTo(0, 3); mctx.lineTo(-5, 6); mctx.closePath(); mctx.fill(); mctx.stroke();
+  mctx.restore();
+}
+
+// ---- player ----------------------------------------------------------------
+const pos = new THREE.Vector3(0, 1.7, 0);
+let yaw = 0, pitch = 0, vy = 0, fly = false, started = false;
+const keys = new Set();
+const EYE = 1.7;
+function teleport(x, z, faceX, faceZ) {
+  const [rx, rz] = nearestRoute(x, z);
+  pos.set(rx, EYE, rz); vy = 0;
+  if (faceX === undefined) { faceX = x; faceZ = z; }
+  if (Math.hypot(faceX - rx, faceZ - rz) > 5) yaw = Math.atan2(-(faceX - rx), -(faceZ - rz));
+  pitch = 0.08;
+}
+addEventListener('keydown', e => {
+  if (e.repeat) return;
+  keys.add(e.code);
+  if (!started) return;
+  if (e.code === 'KeyF') { fly = !fly; vy = 0; if (fly && pos.y < 30) pos.y = 30; }
+  if (e.code === 'KeyG') setSat(!satOn);
+  if (e.code === 'KeyH') { sun.castShadow = !sun.castShadow; }
+  const d = /^Digit([1-7])$/.exec(e.code);
+  if (d && landmarks[d[1] - 1]) { const l = landmarks[d[1] - 1]; teleport(l.x, l.z); }
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+document.addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== canvas) return;
+  yaw -= e.movementX * 0.0022; pitch -= e.movementY * 0.0022;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch));
+});
+function begin() {
+  if (!landmarks.length) return;
+  started = true; $('start').style.display = 'none';
+  const p = canvas.requestPointerLock && canvas.requestPointerLock();
+  if (p && p.catch) p.catch(() => {});
+}
+$('start').addEventListener('click', begin);
+canvas.addEventListener('click', begin);
+document.addEventListener('pointerlockchange', () => {
+  $('keys').innerHTML = document.pointerLockElement === canvas
+    ? '<b>WASD</b> move · <b>Shift</b> run · <b>Space</b> jump · <b>F</b> fly · <b>G</b> ground · <b>1–7</b> landmarks · <b>Esc</b> release mouse'
+    : (started ? 'Click the view to capture the mouse · arrow keys also turn' : '');
+});
+
+function step(dt) {
+  const turn = 1.6 * dt;
+  if (keys.has('ArrowLeft')) yaw += turn; if (keys.has('ArrowRight')) yaw -= turn;
+  if (keys.has('ArrowUp')) pitch = Math.min(1.5, pitch + turn); if (keys.has('ArrowDown')) pitch = Math.max(-1.5, pitch - turn);
+  let f = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0), s = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+  const run = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const speed = fly ? (run ? 260 : 70) : (run ? 16 : 5);
+  if (f || s) {
+    const l = Math.hypot(f, s); f /= l; s /= l;
+    const sn = Math.sin(yaw), cs = Math.cos(yaw);
+    const dx = (-sn * f + cs * s) * speed * dt, dz = (-cs * f - sn * s) * speed * dt;
+    if (fly) { pos.x += dx; pos.z += dz; }
+    else {
+      if (!blocked(pos.x + dx, pos.z + dz) || blocked(pos.x, pos.z)) { pos.x += dx; pos.z += dz; }
+      else if (!blocked(pos.x + dx, pos.z)) pos.x += dx;
+      else if (!blocked(pos.x, pos.z + dz)) pos.z += dz;
+    }
+  }
+  if (fly) {
+    const v = ((keys.has('Space') ? 1 : 0) - (keys.has('KeyC') || keys.has('ControlLeft') ? 1 : 0)) * (run ? 120 : 40) * dt;
+    pos.y = Math.max(EYE, Math.min(1500, pos.y + v));
+  } else {
+    if (keys.has('Space') && pos.y <= EYE + 0.001) vy = 5.2;
+    vy -= 14 * dt; pos.y += vy * dt;
+    if (pos.y <= EYE) { pos.y = EYE; vy = 0; }
+  }
+  pos.x = Math.max(-9000, Math.min(9000, pos.x)); pos.z = Math.max(-11000, Math.min(11000, pos.z));
+}
+
+let hudT = 0;
+function hud() {
+  let best = null, bd = 260 * 260;
+  for (const p of pois) { const d = (p.x - pos.x) ** 2 + (p.z - pos.z) ** 2; if (d < bd) { bd = d; best = p; } }
+  $('place').textContent = best ? best.n : 'Arabian Gulf Road';
+  const end = landmarks[landmarks.length - 1], km = Math.hypot(end.x - pos.x, end.z - pos.z) / 1000;
+  const deg = ((-yaw * 180 / Math.PI) % 360 + 360) % 360;
+  const dir = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8];
+  $('sub').textContent = `Facing ${dir} · ${km.toFixed(1)} km to Jumeirah Messilah` + (fly ? ` · FLYING ${Math.round(pos.y)} m` : '');
+}
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (started) step(dt);
+  camera.position.copy(pos); camera.rotation.set(pitch, yaw, 0);
+  sky.position.set(pos.x, 0, pos.z);
+  scene.fog.far = 5200 + Math.min(4000, pos.y * 8);
+  // keep the shadow square centred on the player (snapped, so shadows don't crawl)
+  sun.target.position.set(Math.round(pos.x / 6) * 6, 0, Math.round(pos.z / 6) * 6);
+  sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, 1100);
+  // over the photo, the drawn roads are solid at walking height and fade out as you climb
+  const ro = satOn ? Math.max(0, Math.min(1, (70 - pos.y) / 50)) : 1;
+  for (const m of roadLayers) { m.material.opacity = ro; m.visible = ro > 0.01; }
+  if (grain) { grain.position.set(pos.x, 0, pos.z); grain.material.uniforms.eye.value.copy(pos); }
+  renderer.render(scene, camera);
+  if (landmarks.length && (hudT += dt) > 0.1) { hudT = 0; hud(); drawMap(); updateTiles(pos.x, pos.z); }
+  requestAnimationFrame(frame);
+}
+
+fetch('./scene.json').then(r => r.json()).then(S => {
+  build(S);
+  setSat(true);
+  const T = S.towers.main;
+  // start on the Gulf Road ~250 m south of the towers, looking at them
+  teleport(T[0] + 40, T[1] + 260, T[0], T[1]);
+  pitch = 0.22;
+  $('go').textContent = 'Click anywhere to start walking';
+  hud(); drawMap();
+  window.__walk = { pos, teleport, landmarks, set: (x, y, z, yw, pt) => { pos.set(x, y, z); yaw = yw; pitch = pt; }, start: () => { started = true; $('start').style.display = 'none'; }, info: () => renderer.info.render };
+}).catch(e => { $('go').textContent = 'Could not load scene.json — open this through the local server (see README).'; console.error(e); });
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

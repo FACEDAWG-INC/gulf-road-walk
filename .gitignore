@@ -1,0 +1,6 @@
+# early exploratory queries, not needed to rebuild the scene
+data/q1.*
+data/q2.*
+data/q3.*
+node_modules/
+.env*
