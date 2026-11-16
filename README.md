@@ -2,7 +2,9 @@
 
 A walkable 3D model of Kuwait's Arabian Gulf Road in the browser: about 17 km of coast from the Kuwait Towers, through Salmiya, down to Jumeirah Messilah Beach. Built with three.js from OpenStreetMap data, with satellite imagery streamed onto the ground.
 
-## Run it
+**Live:** https://facedawg-inc.github.io/gulf-road-walk/
+
+## Run it locally
 
 ```bash
 node serve.js
